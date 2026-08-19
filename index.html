@@ -79,63 +79,92 @@
     // User provided Google Apps Script Web App URL connected to Google Sheets
     const GAS_WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbyc-3RCgkm8ohFwiGI2ph1dTzOxjNjWisNKwxzzyI6_pZBOVrJpZI4kE89m1Wu2y3dcsQ/exec';
 
-    window.GoogleSheetsStorage = {
-      isReady: false,
-      currentRoomId: tripRoomId,
-      gasUrl: GAS_WEB_APP_URL,
-      isSaving: false,
+window.GoogleSheetsStorage = {
+  isReady: false,
+  currentRoomId: tripRoomId,
+  gasUrl: GAS_WEB_APP_URL,
+  isSaving: false,
+  updateCallback: null,
 
-      // Fetch latest data from Google Sheets API
-      fetchData: async function(onDataUpdate) {
-        if (this.isSaving) return; // Skip fetch if currently saving to avoid race condition
-        try {
-          const res = await fetch(`${this.gasUrl}?trip=${encodeURIComponent(this.currentRoomId)}&action=get`);
-          if (res.ok) {
-            const json = await res.json();
-            if (json && (json.data || json.itinerary)) {
-              onDataUpdate(json.data || json);
-              this.isReady = true;
-            }
-          }
-        } catch (e) {
-          console.warn("Google Sheets API fetch note:", e);
+  // 取得最新資料（加入防快取機制）
+  fetchData: async function(onDataUpdate) {
+    if (this.isSaving) return;
+    const cb = onDataUpdate || this.updateCallback;
+    if (!cb) return;
+
+    try {
+      // 加入 _t 時間戳與 cache: 'no-store'，徹底避開瀏覽器 GET 快取
+      const timestamp = Date.now();
+      const res = await fetch(
+        `${this.gasUrl}?trip=${encodeURIComponent(this.currentRoomId)}&action=get&_t=${timestamp}`,
+        { cache: 'no-store' }
+      );
+
+      if (res.ok) {
+        const json = await res.json();
+        console.log("📥 從 Google Sheets 成功讀取資料:", json);
+
+        // 兼容多種 GAS 回傳結構 (json.data / json.payload / json.saved / json 本身)
+        const targetData = json.data || json.payload || json.saved || json;
+        
+        if (targetData && typeof targetData === 'object') {
+          cb(targetData);
+          this.isReady = true;
         }
-      },
-
-      // Initialize periodic auto-sync with Google Sheets
-      init: function(onDataUpdate) {
-        // Initial fetch
-        this.fetchData(onDataUpdate);
-
-        // Auto polling every 6 seconds to fetch updates from collaborators
-        setInterval(() => {
-          this.fetchData(onDataUpdate);
-        }, 6000);
-      },
-
-      // Save payload data to Google Sheets API
-      saveData: async function(payload) {
-        this.isSaving = true;
-        try {
-          await fetch(this.gasUrl, {
-            method: 'POST',
-            mode: 'cors',
-            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-            body: JSON.stringify({
-              action: 'save',
-              trip: this.currentRoomId,
-              timestamp: new Date().toISOString(),
-              payload: payload
-            })
-          });
-        } catch (err) {
-          console.error("Google Sheets save error:", err);
-          throw err;
-        } finally {
-          this.isSaving = false;
-        }
+      } else {
+        console.warn("GAS 回應非 200 狀態:", res.status);
       }
-    };
+    } catch (e) {
+      console.warn("Google Sheets API 讀取錯誤:", e);
+    }
+  },
+
+  // 初始化定期輪詢
+  init: function(onDataUpdate) {
+    this.updateCallback = onDataUpdate;
+    // 進入頁面時立即抓取
+    this.fetchData(onDataUpdate);
+
+    // 每 4 秒自動輪詢同行者的最新異動
+    setInterval(() => {
+      this.fetchData(this.updateCallback);
+    }, 4000);
+  },
+
+  // 儲存資料
+  saveData: async function(payload) {
+    this.isSaving = true;
+    try {
+      const res = await fetch(this.gasUrl, {
+        method: 'POST',
+        mode: 'cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({
+          action: 'save',
+          trip: this.currentRoomId,
+          timestamp: new Date().toISOString(),
+          payload: payload
+        })
+      });
+
+      if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+      
+      const resData = await res.json().catch(() => null);
+      console.log(" 寫入 Google Sheets 成功:", resData);
+
+      // 寫入完成後，稍作延遲並立即重新拉取確認最新狀態
+      setTimeout(() => {
+        this.fetchData(this.updateCallback);
+      }, 500);
+
+    } catch (err) {
+      console.error("Google Sheets 儲存錯誤:", err);
+      throw err;
+    } finally {
+      this.isSaving = false;
+    }
+  }
+};
   </script>
 
   <script type="text/babel">
