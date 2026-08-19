@@ -72,99 +72,89 @@
   <div id="root"></div>
 
   <script>
-    // Get trip room ID from URL parameters or fallback to default
     const urlParams = new URLSearchParams(window.location.search);
     const tripRoomId = urlParams.get('trip') || 'singapore-3d2n-trip';
 
-    // User provided Google Apps Script Web App URL connected to Google Sheets
     const GAS_WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbyc-3RCgkm8ohFwiGI2ph1dTzOxjNjWisNKwxzzyI6_pZBOVrJpZI4kE89m1Wu2y3dcsQ/exec';
 
-window.GoogleSheetsStorage = {
-  isReady: false,
-  currentRoomId: tripRoomId,
-  gasUrl: GAS_WEB_APP_URL,
-  isSaving: false,
-  updateCallback: null,
+    window.GoogleSheetsStorage = {
+      isReady: false,
+      currentRoomId: tripRoomId,
+      gasUrl: GAS_WEB_APP_URL,
+      isSaving: false,
+      updateCallback: null,
 
-  // 取得最新資料（加入防快取機制）
-  fetchData: async function(onDataUpdate) {
-    if (this.isSaving) return;
-    const cb = onDataUpdate || this.updateCallback;
-    if (!cb) return;
+      fetchData: async function(onDataUpdate) {
+        if (this.isSaving) return;
+        const cb = onDataUpdate || this.updateCallback;
+        if (!cb) return;
 
-    try {
-      // 加入 _t 時間戳與 cache: 'no-store'，徹底避開瀏覽器 GET 快取
-      const timestamp = Date.now();
-      const res = await fetch(
-        `${this.gasUrl}?trip=${encodeURIComponent(this.currentRoomId)}&action=get&_t=${timestamp}`,
-        { cache: 'no-store' }
-      );
+        try {
+          const timestamp = Date.now();
+          const res = await fetch(
+            `${this.gasUrl}?trip=${encodeURIComponent(this.currentRoomId)}&action=get&_t=${timestamp}`,
+            { cache: 'no-store' }
+          );
 
-      if (res.ok) {
-        const json = await res.json();
-        console.log("📥 從 Google Sheets 成功讀取資料:", json);
+          if (res.ok) {
+            const json = await res.json();
+            console.log("📥 從 Google Sheets 成功讀取資料:", json);
 
-        // 兼容多種 GAS 回傳結構 (json.data / json.payload / json.saved / json 本身)
-        const targetData = json.data || json.payload || json.saved || json;
-        
-        if (targetData && typeof targetData === 'object') {
-          cb(targetData);
-          this.isReady = true;
+            const targetData = json.data || json.payload || json.saved || json;
+            
+            if (targetData && typeof targetData === 'object') {
+              cb(targetData);
+              this.isReady = true;
+            }
+          } else {
+            console.warn("GAS 回應非 200 狀態:", res.status);
+          }
+        } catch (e) {
+          console.warn("Google Sheets API 讀取錯誤:", e);
         }
-      } else {
-        console.warn("GAS 回應非 200 狀態:", res.status);
+      },
+
+      init: function(onDataUpdate) {
+        this.updateCallback = onDataUpdate;
+        this.fetchData(onDataUpdate);
+
+        setInterval(() => {
+          this.fetchData(this.updateCallback);
+        }, 4000);
+      },
+
+      saveData: async function(payload) {
+        this.isSaving = true;
+        try {
+          const res = await fetch(this.gasUrl, {
+            method: 'POST',
+            mode: 'cors',
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: JSON.stringify({
+              action: 'save',
+              trip: this.currentRoomId,
+              timestamp: new Date().toISOString(),
+              payload: payload
+            })
+          });
+
+          if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+          
+          const resData = await res.json().catch(() => null);
+          console.log("寫入 Google Sheets 成功:", resData);
+
+          setTimeout(() => {
+            this.fetchData(this.updateCallback);
+          }, 500);
+
+        } catch (err) {
+          console.error("Google Sheets 儲存錯誤:", err);
+          throw err;
+        } finally {
+          this.isSaving = false;
+        }
       }
-    } catch (e) {
-      console.warn("Google Sheets API 讀取錯誤:", e);
-    }
-  },
-
-  // 初始化定期輪詢
-  init: function(onDataUpdate) {
-    this.updateCallback = onDataUpdate;
-    // 進入頁面時立即抓取
-    this.fetchData(onDataUpdate);
-
-    // 每 4 秒自動輪詢同行者的最新異動
-    setInterval(() => {
-      this.fetchData(this.updateCallback);
-    }, 4000);
-  },
-
-  // 儲存資料
-  saveData: async function(payload) {
-    this.isSaving = true;
-    try {
-      const res = await fetch(this.gasUrl, {
-        method: 'POST',
-        mode: 'cors',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({
-          action: 'save',
-          trip: this.currentRoomId,
-          timestamp: new Date().toISOString(),
-          payload: payload
-        })
-      });
-
-      if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
-      
-      const resData = await res.json().catch(() => null);
-      console.log(" 寫入 Google Sheets 成功:", resData);
-
-      // 寫入完成後，稍作延遲並立即重新拉取確認最新狀態
-      setTimeout(() => {
-        this.fetchData(this.updateCallback);
-      }, 500);
-
-    } catch (err) {
-      console.error("Google Sheets 儲存錯誤:", err);
-      throw err;
-    } finally {
-      this.isSaving = false;
-    }
-  }
-};
+    };
   </script>
 
   <script type="text/babel">
@@ -211,6 +201,7 @@ window.GoogleSheetsStorage = {
       const [hotelFlight, setHotelFlight] = React.useState(initialHotelFlight);
       const [attractionPass, setAttractionPass] = React.useState(initialAttractionPass);
       const [foodBudget, setFoodBudget] = React.useState(5000);
+      const [transportBudget, setTransportBudget] = React.useState(1500); // 獨立交通預算
       const [quickNotes, setQuickNotes] = React.useState('1. 記得準備新加坡 E-Visa 與填寫 SG Arrival Card\n2. 帶好英規轉接頭\n3. 交通卡可直接刷含感應功能的信用卡 (EZ-Link / Visa / Mastercard)');
 
       const [activeTab, setActiveTab] = React.useState('itinerary');
@@ -233,8 +224,8 @@ window.GoogleSheetsStorage = {
         return itinerary.reduce((sum, item) => sum + (Number(item.cost) || 0), 0);
       }, [itinerary]);
 
-      // Transport costs from itinerary
-      const transportCost = React.useMemo(() => {
+      // 行程細項中的交通花費
+      const itineraryTransportCost = React.useMemo(() => {
         return itinerary.reduce((sum, item) => {
           return item.transportIcon === 'fa-taxi' || item.transport.includes('地鐵') || item.cost > 0 
             ? sum + (Number(item.cost) || 0) 
@@ -242,21 +233,24 @@ window.GoogleSheetsStorage = {
         }, 0);
       }, [itinerary]);
 
-      // Calculate total attractions (Pass + Extra entrance fees)
-      const totalAttractionCost = totalPassCost + (extraItineraryCost - transportCost);
+      // 總交通花費（手動設定的交通預算 + 行程內額外交通費）
+      const totalTransportCost = Number(transportBudget) || 0;
 
-      const totalEstimatedExpense = totalFlightCost + totalHotelCost + foodBudget + transportCost + totalAttractionCost;
+      // 景點花費
+      const totalAttractionCost = totalPassCost + (extraItineraryCost - itineraryTransportCost);
+
+      // 總預估花費
+      const totalEstimatedExpense = totalFlightCost + totalHotelCost + foodBudget + totalTransportCost + totalAttractionCost;
       const remainingBalance = totalBudget - totalEstimatedExpense;
       const budgetPercentage = Math.min(100, Math.round((totalEstimatedExpense / totalBudget) * 100));
 
-      // Filtered Itinerary Memo
       const filteredItinerary = React.useMemo(() => {
         return itinerary.filter(item => {
           const matchDay = dayFilter === 'ALL' || item.day === Number(dayFilter);
           const matchStatus = statusFilter === 'ALL' || item.status === statusFilter;
           const matchSearch = searchTerm === '' || 
             item.activity.toLowerCase().includes(searchTerm.toLowerCase()) || 
-            item.location.toLowerCase().includes(searchTerm.toLowerCase()) ||
+            item.location.toLowerCase().includes(searchTerm.toLowerCase()) || 
             item.transport.toLowerCase().includes(searchTerm.toLowerCase());
           return matchDay && matchStatus && matchSearch;
         });
@@ -272,6 +266,7 @@ window.GoogleSheetsStorage = {
             if (sheetData.hotelFlight !== undefined) setHotelFlight(sheetData.hotelFlight);
             if (sheetData.attractionPass !== undefined) setAttractionPass(sheetData.attractionPass);
             if (sheetData.foodBudget !== undefined) setFoodBudget(sheetData.foodBudget);
+            if (sheetData.transportBudget !== undefined) setTransportBudget(sheetData.transportBudget);
             if (sheetData.quickNotes !== undefined) setQuickNotes(sheetData.quickNotes);
             setSyncStatus('saved');
             setTimeout(() => { isRemoteUpdating.current = false; }, 400);
@@ -279,7 +274,6 @@ window.GoogleSheetsStorage = {
         }
       }, []);
 
-      // Save to Google Sheets API
       const saveToCloud = React.useCallback((payload) => {
         if (window.GoogleSheetsStorage && !isRemoteUpdating.current) {
           setSyncStatus('saving');
@@ -316,18 +310,26 @@ window.GoogleSheetsStorage = {
         saveToCloud({ attractionPass: updated });
       };
 
+      const handleTransportBudgetChange = (newCost) => {
+        const val = Math.max(0, parseInt(newCost) || 0);
+        setTransportBudget(val);
+        saveToCloud({ transportBudget: val });
+      };
+
       const handleResetData = () => {
         setTotalBudget(60000);
         setItinerary(initialItinerary);
         setHotelFlight(initialHotelFlight);
         setAttractionPass(initialAttractionPass);
         setFoodBudget(5000);
+        setTransportBudget(1500);
         saveToCloud({
           totalBudget: 60000,
           itinerary: initialItinerary,
           hotelFlight: initialHotelFlight,
           attractionPass: initialAttractionPass,
-          foodBudget: 5000
+          foodBudget: 5000,
+          transportBudget: 1500
         });
       };
 
@@ -348,7 +350,6 @@ window.GoogleSheetsStorage = {
 
       return (
         <div className="min-h-screen pb-16">
-          {}
           <header className="sticky top-0 z-40 bg-slate-900/90 backdrop-blur-md border-b border-slate-800 shadow-lg">
             <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3.5">
               <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
@@ -438,7 +439,6 @@ window.GoogleSheetsStorage = {
           </header>
 
           <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6 space-y-6">
-            {}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               {/* Total Budget Card */}
               <div className="glass-card p-5 rounded-3xl border border-slate-800 shadow-xl relative overflow-hidden group">
@@ -465,7 +465,7 @@ window.GoogleSheetsStorage = {
 
               {/* Total Estimated Cost Card */}
               <div className="glass-card p-5 rounded-3xl border border-slate-800 shadow-xl relative overflow-hidden">
-                <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">預估總花費 (含通票與機酒)</p>
+                <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">預估總花費 (含交通/通票/機酒)</p>
                 <div className="text-3xl font-black text-amber-400 font-mono">
                   NT$ {totalEstimatedExpense.toLocaleString()}
                 </div>
@@ -493,13 +493,11 @@ window.GoogleSheetsStorage = {
               </div>
             </div>
 
-            {}
+            {/* ITINERARY TAB */}
             {activeTab === 'itinerary' && (
               <div className="space-y-6">
-                {/* Controls Bar */}
                 <div className="glass-card p-4 rounded-2xl border border-slate-800 flex flex-col md:flex-row gap-4 items-center justify-between">
                   <div className="flex items-center gap-2 w-full md:w-auto flex-wrap">
-                    {/* Day Selector */}
                     <div className="flex bg-slate-900 p-1 rounded-xl border border-slate-800">
                       {['ALL', '1', '2', '3'].map((day) => (
                         <button
@@ -514,7 +512,6 @@ window.GoogleSheetsStorage = {
                       ))}
                     </div>
 
-                    {/* Status Filter */}
                     <select
                       value={statusFilter}
                       onChange={(e) => setStatusFilter(e.target.value)}
@@ -527,7 +524,6 @@ window.GoogleSheetsStorage = {
                     </select>
                   </div>
 
-                  {/* Search and View Mode */}
                   <div className="flex items-center gap-2 w-full md:w-auto justify-end">
                     <div className="relative w-full md:w-48">
                       <i className="fa-solid fa-magnifying-glass absolute left-3 top-2.5 text-xs text-slate-500"></i>
@@ -548,7 +544,7 @@ window.GoogleSheetsStorage = {
                         }`}
                         title="時間軸視圖"
                       >
-                        <i className="fa-solid fa-[#timeline]"></i> 時間軸
+                        <i className="fa-solid fa-timeline"></i> 時間軸
                       </button>
                       <button
                         onClick={() => setViewMode('table')}
@@ -563,7 +559,6 @@ window.GoogleSheetsStorage = {
                   </div>
                 </div>
 
-                {/* Timeline View */}
                 {viewMode === 'timeline' && (
                   <div className="space-y-4">
                     {filteredItinerary.map((item) => (
@@ -602,7 +597,6 @@ window.GoogleSheetsStorage = {
                         </div>
 
                         <div className="flex items-center justify-between md:justify-end gap-4 border-t md:border-t-0 pt-3 md:pt-0 border-slate-800">
-                          {/* Cost Input */}
                           <div className="flex items-center gap-1 bg-slate-900/80 px-3 py-1.5 rounded-xl border border-slate-800">
                             <span className="text-xs text-slate-500">NT$</span>
                             <input
@@ -614,7 +608,6 @@ window.GoogleSheetsStorage = {
                             />
                           </div>
 
-                          {/* Status Select */}
                           <select
                             value={item.status}
                             onChange={(e) => handleItineraryStatusChange(item.id, e.target.value)}
@@ -634,7 +627,6 @@ window.GoogleSheetsStorage = {
                   </div>
                 )}
 
-                {/* Table View */}
                 {viewMode === 'table' && (
                   <div className="glass-card rounded-2xl border border-slate-800 overflow-x-auto">
                     <table className="w-full text-left border-collapse">
@@ -684,10 +676,9 @@ window.GoogleSheetsStorage = {
               </div>
             )}
 
-            {}
+            {/* BUDGET TAB */}
             {activeTab === 'budget' && (
               <div className="space-y-6">
-                {/* Accommodation & Flights & Attraction Pass Card */}
                 <div className="glass-card p-6 rounded-3xl border border-slate-800 space-y-4">
                   <div className="flex items-center justify-between border-b border-slate-800 pb-3">
                     <h3 className="text-base font-bold text-white flex items-center gap-2">
@@ -744,7 +735,7 @@ window.GoogleSheetsStorage = {
                   </div>
                 </div>
 
-                {/* Category Breakdown Progress */}
+                {/* Category Breakdown Progress with Transport Edit */}
                 <div className="glass-card p-6 rounded-3xl border border-slate-800 space-y-4">
                   <h3 className="text-base font-bold text-white border-b border-slate-800 pb-3">預算分類統計與比例</h3>
 
@@ -753,8 +744,27 @@ window.GoogleSheetsStorage = {
                       { name: '機票費用', amount: totalFlightCost, icon: 'fa-plane', color: 'bg-sky-500' },
                       { name: '住宿費用', amount: totalHotelCost, icon: 'fa-hotel', color: 'bg-teal-500' },
                       { name: '景點門票/通票', amount: totalAttractionCost, icon: 'fa-ticket', color: 'bg-amber-500' },
-                      { name: '預估餐飲費用', amount: foodBudget, icon: 'fa-utensils', color: 'bg-emerald-500', isEditable: true },
-                      { name: '交通花費', amount: transportCost, icon: 'fa-route', color: 'bg-purple-500' }
+                      { 
+                        name: '預估餐飲費用', 
+                        amount: foodBudget, 
+                        icon: 'fa-utensils', 
+                        color: 'bg-emerald-500', 
+                        isEditable: true,
+                        value: foodBudget,
+                        onChange: (val) => {
+                          setFoodBudget(val);
+                          saveToCloud({ foodBudget: val });
+                        }
+                      },
+                      { 
+                        name: '交通預算 (地鐵/巴士/Grab)', 
+                        amount: totalTransportCost, 
+                        icon: 'fa-route', 
+                        color: 'bg-purple-500',
+                        isEditable: true,
+                        value: transportBudget,
+                        onChange: (val) => handleTransportBudgetChange(val)
+                      }
                     ].map((cat, idx) => (
                       <div key={idx} className="space-y-1">
                         <div className="flex justify-between items-center text-xs">
@@ -767,11 +777,10 @@ window.GoogleSheetsStorage = {
                                 <span className="text-slate-500">NT$</span>
                                 <input
                                   type="number"
-                                  value={foodBudget}
+                                  value={cat.value}
                                   onChange={(e) => {
                                     const val = Math.max(0, parseInt(e.target.value) || 0);
-                                    setFoodBudget(val);
-                                    saveToCloud({ foodBudget: val });
+                                    cat.onChange(val);
                                   }}
                                   className="w-20 bg-slate-900 border border-slate-700 text-xs font-bold text-emerald-400 px-2 py-0.5 rounded focus:outline-none"
                                 />
@@ -783,7 +792,7 @@ window.GoogleSheetsStorage = {
                           </div>
                         </div>
                         <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
-                          <div
+                          <div 
                             className={`h-full ${cat.color}`}
                             style={{ width: `${Math.min(100, (cat.amount / (totalEstimatedExpense || 1)) * 100)}%` }}
                           ></div>
@@ -795,7 +804,7 @@ window.GoogleSheetsStorage = {
               </div>
             )}
 
-            {}
+            {/* FOOD TAB */}
             {activeTab === 'food' && (
               <div className="space-y-6">
                 <div className="glass-card p-6 rounded-3xl border border-slate-800 flex flex-col md:flex-row items-center justify-between gap-4">
@@ -852,9 +861,34 @@ window.GoogleSheetsStorage = {
               </div>
             )}
 
-            {}
+            {/* TRANSPORT TAB (WITH EDITABLE TRANSPORT BUDGET) */}
             {activeTab === 'transport' && (
               <div className="space-y-6">
+                {/* Editable Transport Budget Card */}
+                <div className="glass-card p-6 rounded-3xl border border-purple-500/30 bg-gradient-to-r from-purple-950/30 to-slate-900/80 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40">
+                        交通預算管理
+                      </span>
+                      <h3 className="text-base font-bold text-white">新加坡市區總交通預算</h3>
+                    </div>
+                    <p className="text-xs text-slate-400 mt-1">
+                      包含 MRT 地鐵、聖淘沙捷運、公車與 Grab 叫車費用。支援直接刷海外感應信用卡 (Visa / Mastercard)。
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2 bg-slate-900/90 px-4 py-2.5 rounded-2xl border border-purple-500/30">
+                    <span className="text-xs text-purple-300 font-bold">預估交通額度: NT$</span>
+                    <input
+                      type="number"
+                      value={transportBudget}
+                      onChange={(e) => handleTransportBudgetChange(e.target.value)}
+                      className="w-24 bg-transparent text-base font-mono font-black text-purple-300 border-b border-dashed border-purple-400 focus:outline-none"
+                    />
+                  </div>
+                </div>
+
                 <div className="glass-card p-6 rounded-3xl border border-slate-800 space-y-4">
                   <h3 className="text-lg font-bold text-white flex items-center gap-2">
                     <i className="fa-solid fa-route text-emerald-400"></i> 新加坡景點間交通路線指南
@@ -922,7 +956,6 @@ window.GoogleSheetsStorage = {
             </div>
           </main>
 
-          {}
           {showShareModal && (
             <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4">
               <div className="glass-card max-w-md w-full p-6 rounded-3xl border border-slate-700 shadow-2xl relative">
