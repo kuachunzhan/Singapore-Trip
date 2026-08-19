@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>新加坡 3 天 2 夜行程與預算視覺化</title>
+  <title>新加坡 3 天 2 夜行程與預算視覺化 (Google Sheets 版)</title>
 
   <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
@@ -71,98 +71,53 @@
 <body class="min-h-screen text-slate-100 bg-slate-950">
   <div id="root"></div>
 
-  <script type="module">
-    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-    import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-    import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-
+  <script>
     // Get trip room ID from URL parameters or fallback to default
     const urlParams = new URLSearchParams(window.location.search);
     const tripRoomId = urlParams.get('trip') || 'singapore-3d2n-trip';
 
-    const appId = typeof __app_id !== 'undefined' ? __app_id : 'singapore-travel-visualizer';
-    
-    // User provided Google Apps Script Web App URL
+    // User provided Google Apps Script Web App URL connected to Google Sheets
     const GAS_WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbxN0r-5WjDqtASQ5DZWyDblDNxUyj_nH89Q-QF8-RpZiCyJzuOXDw5FD7BPJfVJ_vBUpw/exec';
 
-    // Check saved custom firebase config from localStorage if available
-    let customConfig = null;
-    try {
-      const saved = localStorage.getItem('custom_firebase_config');
-      if (saved) customConfig = JSON.parse(saved);
-    } catch(e) {}
-
-    const firebaseConfig = customConfig || (typeof __firebase_config !== 'undefined' && __firebase_config ? JSON.parse(__firebase_config) : null);
-
-    window.CloudStorage = {
+    window.GoogleSheetsStorage = {
       isReady: false,
-      currentUser: null,
       currentRoomId: tripRoomId,
       gasUrl: GAS_WEB_APP_URL,
-      firebaseConfig: firebaseConfig,
-      init: async function(onDataUpdate) {
-        // 1. First try fetching existing data from Google Apps Script / Google Form Database
+      isSaving: false,
+
+      // Fetch latest data from Google Sheets API
+      fetchData: async function(onDataUpdate) {
+        if (this.isSaving) return; // Skip fetch if currently saving to avoid race condition
         try {
-          const gasRes = await fetch(`${this.gasUrl}?trip=${encodeURIComponent(this.currentRoomId)}&action=get`);
-          if (gasRes.ok) {
-            const gasJson = await gasRes.json();
-            if (gasJson && (gasJson.data || gasJson.itinerary)) {
-              onDataUpdate(gasJson.data || gasJson);
+          const res = await fetch(`${this.gasUrl}?trip=${encodeURIComponent(this.currentRoomId)}&action=get`);
+          if (res.ok) {
+            const json = await res.json();
+            if (json && (json.data || json.itinerary)) {
+              onDataUpdate(json.data || json);
               this.isReady = true;
             }
           }
         } catch (e) {
-          console.warn("Google Apps Script initial fetch warning, falling back to Firebase/Local:", e);
-        }
-
-        // 2. Initialize Firebase as secondary/real-time sync provider if present
-        if (!this.firebaseConfig) {
-          console.warn("Cloud firebase config not present, running with Google Sheets API mode.");
-          this.isReady = true;
-          return;
-        }
-
-        try {
-          const app = initializeApp(this.firebaseConfig);
-          const auth = getAuth(app);
-          const db = getFirestore(app);
-
-          let userCredential;
-          if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-            userCredential = await signInWithCustomToken(auth, __initial_auth_token);
-          } else {
-            userCredential = await signInAnonymously(auth);
-          }
-          this.currentUser = userCredential.user;
-          this.isReady = true;
-
-          const tripDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'itineraries', this.currentRoomId);
-
-          onSnapshot(tripDocRef, (snapshot) => {
-            if (snapshot.exists()) {
-              onDataUpdate(snapshot.data());
-            }
-          }, (err) => {
-            console.error("Cloud sync snapshot error:", err);
-          });
-
-          this.saveToFirebase = async (payload) => {
-            if (!this.currentUser) return;
-            try {
-              await setDoc(tripDocRef, payload, { merge: true });
-            } catch (err) {
-              console.error("Firebase save error:", err);
-            }
-          };
-        } catch (err) {
-          console.error("Firebase initialization error:", err);
+          console.warn("Google Sheets API fetch note:", e);
         }
       },
 
+      // Initialize periodic auto-sync with Google Sheets
+      init: function(onDataUpdate) {
+        // Initial fetch
+        this.fetchData(onDataUpdate);
+
+        // Auto polling every 6 seconds to fetch updates from collaborators
+        setInterval(() => {
+          this.fetchData(onDataUpdate);
+        }, 6000);
+      },
+
+      // Save payload data to Google Sheets API
       saveData: async function(payload) {
-        // Post data to Google Apps Script Web App
+        this.isSaving = true;
         try {
-          fetch(this.gasUrl, {
+          await fetch(this.gasUrl, {
             method: 'POST',
             mode: 'cors',
             headers: { 'Content-Type': 'text/plain;charset=utf-8' },
@@ -172,14 +127,12 @@
               timestamp: new Date().toISOString(),
               payload: payload
             })
-          }).catch(err => console.warn("GAS save async background note:", err));
-        } catch(err) {
-          console.error("Google Apps Script save error:", err);
-        }
-
-        // Save to Firebase if enabled
-        if (this.saveToFirebase) {
-          await this.saveToFirebase(payload);
+          });
+        } catch (err) {
+          console.error("Google Sheets save error:", err);
+          throw err;
+        } finally {
+          this.isSaving = false;
         }
       }
     };
@@ -238,14 +191,8 @@
       const [searchTerm, setSearchTerm] = React.useState('');
 
       const [showShareModal, setShowShareModal] = React.useState(false);
-      const [showConfigModal, setShowConfigModal] = React.useState(false);
-      const [customConfigInput, setCustomConfigInput] = React.useState(
-        window.CloudStorage && window.CloudStorage.firebaseConfig 
-          ? JSON.stringify(window.CloudStorage.firebaseConfig, null, 2) 
-          : ''
-      );
       const [copySuccess, setCopySuccess] = React.useState(false);
-      const [syncStatus, setSyncStatus] = React.useState('offline');
+      const [syncStatus, setSyncStatus] = React.useState('saved');
 
       const isRemoteUpdating = React.useRef(false);
 
@@ -287,30 +234,27 @@
       }, [itinerary, dayFilter, statusFilter, searchTerm]);
 
       React.useEffect(() => {
-        if (window.CloudStorage) {
-          if (window.CloudStorage.firebaseConfig) {
-            setSyncStatus('saved');
-          }
-          window.CloudStorage.init((cloudData) => {
-            if (!cloudData) return;
+        if (window.GoogleSheetsStorage) {
+          window.GoogleSheetsStorage.init((sheetData) => {
+            if (!sheetData) return;
             isRemoteUpdating.current = true;
-            if (cloudData.totalBudget !== undefined) setTotalBudget(cloudData.totalBudget);
-            if (cloudData.itinerary !== undefined) setItinerary(cloudData.itinerary);
-            if (cloudData.hotelFlight !== undefined) setHotelFlight(cloudData.hotelFlight);
-            if (cloudData.attractionPass !== undefined) setAttractionPass(cloudData.attractionPass);
-            if (cloudData.foodBudget !== undefined) setFoodBudget(cloudData.foodBudget);
-            if (cloudData.quickNotes !== undefined) setQuickNotes(cloudData.quickNotes);
+            if (sheetData.totalBudget !== undefined) setTotalBudget(sheetData.totalBudget);
+            if (sheetData.itinerary !== undefined) setItinerary(sheetData.itinerary);
+            if (sheetData.hotelFlight !== undefined) setHotelFlight(sheetData.hotelFlight);
+            if (sheetData.attractionPass !== undefined) setAttractionPass(sheetData.attractionPass);
+            if (sheetData.foodBudget !== undefined) setFoodBudget(sheetData.foodBudget);
+            if (sheetData.quickNotes !== undefined) setQuickNotes(sheetData.quickNotes);
             setSyncStatus('saved');
-            setTimeout(() => { isRemoteUpdating.current = false; }, 300);
+            setTimeout(() => { isRemoteUpdating.current = false; }, 400);
           });
         }
       }, []);
 
-      // Save to Cloud Firestore
+      // Save to Google Sheets API
       const saveToCloud = React.useCallback((payload) => {
-        if (window.CloudStorage && window.CloudStorage.isReady && !isRemoteUpdating.current) {
+        if (window.GoogleSheetsStorage && !isRemoteUpdating.current) {
           setSyncStatus('saving');
-          window.CloudStorage.saveData(payload)
+          window.GoogleSheetsStorage.saveData(payload)
             .then(() => setSyncStatus('saved'))
             .catch(() => setSyncStatus('offline'));
         }
@@ -360,7 +304,7 @@
 
       const handleCopyShareLink = () => {
         const currentUrl = window.location.href.split('?')[0];
-        const shareUrl = `${currentUrl}?trip=${window.CloudStorage?.currentRoomId || 'singapore-3d2n-trip'}`;
+        const shareUrl = `${currentUrl}?trip=${window.GoogleSheetsStorage?.currentRoomId || 'singapore-3d2n-trip'}`;
         
         const tempInput = document.createElement('input');
         tempInput.value = shareUrl;
@@ -371,16 +315,6 @@
 
         setCopySuccess(true);
         setTimeout(() => setCopySuccess(false), 2500);
-      };
-
-      const handleSaveFirebaseConfig = () => {
-        try {
-          const parsed = JSON.parse(customConfigInput);
-          localStorage.setItem('custom_firebase_config', JSON.stringify(parsed));
-          window.location.reload();
-        } catch(e) {
-          alert("Firebase Config 格式不正確，請貼上有效的 JSON 物件！");
-        }
       };
 
       return (
@@ -395,25 +329,25 @@
                   </div>
                   <div>
                     <div className="flex items-center gap-2 flex-wrap">
-                      <h1 className="text-xl font-black tracking-tight text-white">新加坡 3 天 2 夜遊行程</h1>
+                      <h1 className="text-xl font-black tracking-tight text-white">新加坡 3 天 2 夜行程與預算</h1>
                       
                       {syncStatus === 'saved' && (
-                        <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
-                          <i className="fa-solid fa-sheet-plastic text-emerald-400"></i> Google 試算表同步 ({window.CloudStorage?.currentRoomId})
+                        <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center gap-1.5">
+                          <i className="fa-solid fa-file-excel text-emerald-400"></i> Google 試算表連線中 ({window.GoogleSheetsStorage?.currentRoomId})
                         </span>
                       )}
                       {syncStatus === 'saving' && (
-                        <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center gap-1 animate-pulse">
-                          <i className="fa-solid fa-arrows-rotate animate-spin"></i> 儲存至 Google 試算表中...
+                        <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center gap-1.5 animate-pulse">
+                          <i className="fa-solid fa-arrows-rotate animate-spin"></i> 寫入 Google 試算表中...
                         </span>
                       )}
                       {syncStatus === 'offline' && (
-                        <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-slate-800 text-slate-400 border border-slate-700">
-                          <i className="fa-solid fa-laptop"></i> 本地模式
+                        <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/30 flex items-center gap-1.5">
+                          <i className="fa-solid fa-circle-exclamation"></i> 試算表連線中斷
                         </span>
                       )}
                     </div>
-                    <p className="text-xs text-slate-400">點擊預算數值可直接編輯並即時連動加總</p>
+                    <p className="text-xs text-slate-400">所有變動即時寫入 Google 試算表並於同行設備同步</p>
                   </div>
                 </div>
 
@@ -421,24 +355,17 @@
                 <div className="flex items-center gap-2 flex-wrap">
                   <button
                     onClick={() => setShowShareModal(true)}
-                    className="px-3 py-1.5 rounded-xl text-xs font-bold bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-sm transition-all flex items-center gap-1.5"
+                    className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-sm transition-all flex items-center gap-1.5"
                   >
-                    <i className="fa-solid fa-share-nodes"></i> 🔗 分享多人編輯連結
-                  </button>
-
-                  <button
-                    onClick={() => setShowConfigModal(true)}
-                    className="px-3 py-1.5 rounded-xl text-xs font-bold bg-slate-800 text-slate-300 hover:text-white border border-slate-700 transition-all flex items-center gap-1.5"
-                  >
-                    <i className="fa-solid fa-gear"></i> 金鑰設定
+                    <i className="fa-solid fa-share-nodes"></i> 分享多人同步連結
                   </button>
 
                   <button
                     onClick={handleResetData}
-                    className="px-2.5 py-1.5 rounded-xl text-xs font-bold bg-slate-800 text-slate-400 hover:text-white border border-slate-700 transition-all"
+                    className="px-3 py-1.5 rounded-xl text-xs font-bold bg-slate-800 text-slate-300 hover:text-white border border-slate-700 transition-all flex items-center gap-1"
                     title="重置數據"
                   >
-                    <i className="fa-solid fa-rotate-left"></i>
+                    <i className="fa-solid fa-rotate-left"></i> 重置預算
                   </button>
 
                   {/* Navigation Tabs */}
@@ -504,7 +431,7 @@
                     className="text-3xl font-black text-white bg-transparent border-b border-dashed border-emerald-500/40 focus:border-emerald-400 focus:outline-none w-full font-mono"
                   />
                 </div>
-                <p className="text-[11px] text-slate-400 mt-2">可自由修改，即時計算剩餘資金</p>
+                <p className="text-[11px] text-slate-400 mt-2">點擊數字修改，同步存至 Google 試算表</p>
               </div>
 
               {/* Total Estimated Cost Card */}
@@ -520,7 +447,7 @@
                   ></div>
                 </div>
                 <div className="flex justify-between items-center text-[11px] text-slate-400 mt-1">
-                  <span>已消耗預算</span>
+                  <span>已消耗預算比例</span>
                   <span className="font-bold text-slate-200">{budgetPercentage}%</span>
                 </div>
               </div>
@@ -738,7 +665,7 @@
                       <i className="fa-solid fa-ticket text-emerald-400"></i>
                       主要大額費用與景點通票設定
                     </h3>
-                    <span className="text-xs text-slate-400">直接修改總金額，自動即時計算</span>
+                    <span className="text-xs text-slate-400">修改數字即時寫入 Google 試算表</span>
                   </div>
 
                   {/* Attraction Pass Section */}
@@ -937,7 +864,7 @@
                         <i className="fa-solid fa-taxi"></i> 聖淘沙 ➔ 夜間動物園 (萬禮)
                       </div>
                       <p className="text-xs text-slate-300 leading-relaxed">
-                        距離較遠，建議使用 Grab 叫車或搭乘計程車，車程約 30-40 分鐘，費用約 S$ 20-25 (約 NT$ 500)，多人平攤最划算。
+                        距離較遠，建議使用 Grab 叫車或搭乘計程車，車程約 30-40 分鐘，費用約 S$ 20-25 (約 NT$ 500)，多人平攤最劃算。
                       </p>
                     </div>
                   </div>
@@ -945,13 +872,13 @@
               </div>
             )}
 
-            {}
+            {/* Quick Notes Section */}
             <div className="glass-card p-6 rounded-3xl border border-slate-800 space-y-3">
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-bold text-white flex items-center gap-2">
                   <i className="fa-solid fa-note-sticky text-amber-400"></i> 行前隨手備忘錄
                 </h3>
-                <span className="text-[10px] text-slate-500">雲端自動儲存</span>
+                <span className="text-[10px] text-slate-500">自動同步存至 Google 試算表</span>
               </div>
               <textarea
                 value={quickNotes}
@@ -981,13 +908,13 @@
                   <i className="fa-solid fa-users"></i>
                 </div>
 
-                <h3 className="text-lg font-bold text-white mb-1">線上多人協同編輯連結</h3>
+                <h3 className="text-lg font-bold text-white mb-1">Google 試算表多人同步連結</h3>
                 <p className="text-xs text-slate-400 mb-4 leading-relaxed">
-                  複製下方專屬房間連結傳給同行好友，開啟後所有人即可**即時同步檢視與共同修改預算與行程**！
+                  複製下方專屬房間連結傳給同行好友，所有人開啟後皆可**即時讀取與共同修改您的 Google 試算表預算與行程**！
                 </p>
 
                 <div className="bg-slate-900 p-3 rounded-xl border border-slate-800 text-xs text-emerald-400 font-mono break-all mb-4">
-                  {window.location.href.split('?')[0]}?trip={window.CloudStorage?.currentRoomId || 'singapore-3d2n-trip'}
+                  {window.location.href.split('?')[0]}?trip={window.GoogleSheetsStorage?.currentRoomId || 'singapore-3d2n-trip'}
                 </div>
 
                 <button
@@ -998,54 +925,6 @@
                 >
                   {copySuccess ? <><i className="fa-solid fa-check"></i> 已複製連結！</> : <><i className="fa-solid fa-copy"></i> 複製多人同步連結</>}
                 </button>
-              </div>
-            </div>
-          )}
-
-          {}
-          {showConfigModal && (
-            <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4">
-              <div className="glass-card max-w-lg w-full p-6 rounded-3xl border border-slate-700 shadow-2xl relative">
-                <button 
-                  onClick={() => setShowConfigModal(false)}
-                  className="absolute top-4 right-4 text-slate-400 hover:text-white text-lg"
-                >
-                  <i className="fa-solid fa-xmark"></i>
-                </button>
-
-                <div className="w-12 h-12 rounded-2xl bg-sky-500/20 text-sky-400 flex items-center justify-center text-xl mb-4 border border-sky-500/30">
-                  <i className="fa-solid fa-database"></i>
-                </div>
-
-                <h3 className="text-lg font-bold text-white mb-1">自訂 Firebase 資料庫金鑰</h3>
-                <p className="text-xs text-slate-400 mb-3">
-                  若要在您自己的 GitHub Pages 上進行資料庫託管，請貼上您的 Firebase Console 設定：
-                </p>
-
-                <textarea
-                  value={customConfigInput}
-                  onChange={(e) => setCustomConfigInput(e.target.value)}
-                  placeholder={`{\n  "apiKey": "AIzaSy...",\n  "authDomain": "your-app.firebaseapp.com",\n  "projectId": "your-app",\n  "storageBucket": "your-app.appspot.com",\n  "messagingSenderId": "...",\n  "appId": "..."\n}`}
-                  className="w-full h-40 p-3 bg-slate-900 text-xs font-mono border border-slate-700 rounded-xl focus:outline-none text-slate-200 resize-none mb-4"
-                ></textarea>
-
-                <div className="flex justify-end gap-2">
-                  <button
-                    onClick={() => {
-                      localStorage.removeItem('custom_firebase_config');
-                      window.location.reload();
-                    }}
-                    className="px-3 py-2 rounded-xl text-xs font-bold bg-slate-800 text-rose-400 hover:bg-rose-500/20 border border-slate-700"
-                  >
-                    清除設定
-                  </button>
-                  <button
-                    onClick={handleSaveFirebaseConfig}
-                    className="px-4 py-2 rounded-xl text-xs font-bold bg-sky-500 hover:bg-sky-400 text-slate-950"
-                  >
-                    儲存金鑰並重新載入
-                  </button>
-                </div>
               </div>
             </div>
           )}
