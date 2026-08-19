@@ -1,0 +1,1059 @@
+<!DOCTYPE html>
+<html lang="zh-TW" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>新加坡 3 天 2 夜行程與預算視覺化</title>
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- FontAwesome Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+  <!-- Google Fonts: Inter & Noto Sans TC -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Noto+Sans+TC:wght@300;400;500;700;900&display=swap" rel="stylesheet">
+
+  <!-- React & ReactDOM & Babel -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'Noto Sans TC', 'sans-serif'],
+          },
+          colors: {
+            brand: {
+              50: '#ecfdf5',
+              100: '#d1fae5',
+              500: '#10b981',
+              600: '#059669',
+              700: '#047857',
+              900: '#064e3b',
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    body {
+      font-family: 'Inter', 'Noto Sans TC', sans-serif;
+      background-color: #0b1329;
+      color: #f1f5f9;
+    }
+    .glass-card {
+      background: rgba(15, 23, 42, 0.75);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .custom-scrollbar::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    .custom-scrollbar::-webkit-scrollbar-track {
+      background: rgba(15, 23, 42, 0.6);
+    }
+    .custom-scrollbar::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body class="min-h-screen text-slate-100 bg-slate-950">
+  <div id="root"></div>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+    // Get trip room ID from URL parameters or fallback to default
+    const urlParams = new URLSearchParams(window.location.search);
+    const tripRoomId = urlParams.get('trip') || 'singapore-3d2n-trip';
+
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'singapore-travel-visualizer';
+    
+    // User provided Google Apps Script Web App URL
+    const GAS_WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbxN0r-5WjDqtASQ5DZWyDblDNxUyj_nH89Q-QF8-RpZiCyJzuOXDw5FD7BPJfVJ_vBUpw/exec';
+
+    // Check saved custom firebase config from localStorage if available
+    let customConfig = null;
+    try {
+      const saved = localStorage.getItem('custom_firebase_config');
+      if (saved) customConfig = JSON.parse(saved);
+    } catch(e) {}
+
+    const firebaseConfig = customConfig || (typeof __firebase_config !== 'undefined' && __firebase_config ? JSON.parse(__firebase_config) : null);
+
+    window.CloudStorage = {
+      isReady: false,
+      currentUser: null,
+      currentRoomId: tripRoomId,
+      gasUrl: GAS_WEB_APP_URL,
+      firebaseConfig: firebaseConfig,
+      init: async function(onDataUpdate) {
+        // 1. First try fetching existing data from Google Apps Script / Google Form Database
+        try {
+          const gasRes = await fetch(`${this.gasUrl}?trip=${encodeURIComponent(this.currentRoomId)}&action=get`);
+          if (gasRes.ok) {
+            const gasJson = await gasRes.json();
+            if (gasJson && (gasJson.data || gasJson.itinerary)) {
+              onDataUpdate(gasJson.data || gasJson);
+              this.isReady = true;
+            }
+          }
+        } catch (e) {
+          console.warn("Google Apps Script initial fetch warning, falling back to Firebase/Local:", e);
+        }
+
+        // 2. Initialize Firebase as secondary/real-time sync provider if present
+        if (!this.firebaseConfig) {
+          console.warn("Cloud firebase config not present, running with Google Sheets API mode.");
+          this.isReady = true;
+          return;
+        }
+
+        try {
+          const app = initializeApp(this.firebaseConfig);
+          const auth = getAuth(app);
+          const db = getFirestore(app);
+
+          let userCredential;
+          if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+            userCredential = await signInWithCustomToken(auth, __initial_auth_token);
+          } else {
+            userCredential = await signInAnonymously(auth);
+          }
+          this.currentUser = userCredential.user;
+          this.isReady = true;
+
+          const tripDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'itineraries', this.currentRoomId);
+
+          onSnapshot(tripDocRef, (snapshot) => {
+            if (snapshot.exists()) {
+              onDataUpdate(snapshot.data());
+            }
+          }, (err) => {
+            console.error("Cloud sync snapshot error:", err);
+          });
+
+          this.saveToFirebase = async (payload) => {
+            if (!this.currentUser) return;
+            try {
+              await setDoc(tripDocRef, payload, { merge: true });
+            } catch (err) {
+              console.error("Firebase save error:", err);
+            }
+          };
+        } catch (err) {
+          console.error("Firebase initialization error:", err);
+        }
+      },
+
+      saveData: async function(payload) {
+        // Post data to Google Apps Script Web App
+        try {
+          fetch(this.gasUrl, {
+            method: 'POST',
+            mode: 'cors',
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: JSON.stringify({
+              action: 'save',
+              trip: this.currentRoomId,
+              timestamp: new Date().toISOString(),
+              payload: payload
+            })
+          }).catch(err => console.warn("GAS save async background note:", err));
+        } catch(err) {
+          console.error("Google Apps Script save error:", err);
+        }
+
+        // Save to Firebase if enabled
+        if (this.saveToFirebase) {
+          await this.saveToFirebase(payload);
+        }
+      }
+    };
+  </script>
+
+  <script type="text/babel">
+    const initialItinerary = [
+      { id: '1', day: 1, time: '12:20', activity: '抵達新加坡', location: '樟宜機場', transport: '步行', transportIcon: 'fa-shoe-prints', cost: 0, status: '已完成', passCovered: false, mapUrl: 'https://maps.google.com/?q=Changi+Airport' },
+      { id: '2', day: 1, time: '13:30', activity: '星耀樟宜', location: '樟宜機場', transport: '步行', transportIcon: 'fa-shoe-prints', cost: 0, status: '已完成', passCovered: false, mapUrl: 'https://maps.google.com/?q=Jewel+Changi+Airport' },
+      { id: '3', day: 1, time: '15:30', activity: '飯店入住 (唐人街1900號酒店)', location: '牛車水', transport: '地鐵綠線轉紫線至牛車水站', transportIcon: 'fa-train-subway', cost: 0, status: '已預訂', passCovered: false, mapUrl: 'https://maps.google.com/?q=1900+Hotel+Chinatown+Singapore' },
+      { id: '4', day: 1, time: '17:00', activity: '濱海灣金沙', location: '濱海灣', transport: '地鐵市區線至海灣舫站', transportIcon: 'fa-train-subway', cost: 1500, status: '已預訂', passCovered: false, mapUrl: 'https://maps.google.com/?q=Marina+Bay+Sands' },
+      { id: '5', day: 1, time: '18:30', activity: '濱海灣花園 (花穹與雲霧林)', location: '濱海灣', transport: '步行', transportIcon: 'fa-shoe-prints', cost: 0, status: '已預訂', passCovered: true, mapUrl: 'https://maps.google.com/?q=Gardens+by+the+Bay' },
+      { id: '6', day: 1, time: '20:00', activity: '超級樹燈光秀', location: '濱海灣花園', transport: '步行', transportIcon: 'fa-shoe-prints', cost: 0, status: '未安排', passCovered: false, mapUrl: 'https://maps.google.com/?q=Supertree+Grove' },
+      { id: '7', day: 2, time: '10:00', activity: '新加坡環球影城', location: '聖淘沙', transport: '地鐵紫線至港灣站轉乘聖淘沙捷運', transportIcon: 'fa-train-subway', cost: 0, status: '已預訂', passCovered: true, mapUrl: 'https://maps.google.com/?q=Universal+Studios+Singapore' },
+      { id: '8', day: 2, time: '16:00', activity: 'S.E.A. 海洋館', location: '聖淘沙', transport: '步行', transportIcon: 'fa-shoe-prints', cost: 0, status: '已預訂', passCovered: true, mapUrl: 'https://maps.google.com/?q=S.E.A.+Aquarium' },
+      { id: '9', day: 2, time: '18:00', activity: '出發前往夜間動物園', location: '交通', transport: '搭乘 Grab 或計程車', transportIcon: 'fa-taxi', cost: 500, status: '未安排', passCovered: false, mapUrl: 'https://maps.google.com/?q=Night+Safari+Singapore' },
+      { id: '10', day: 2, time: '19:15', activity: '新加坡夜間動物園', location: '萬禮', transport: '步行', transportIcon: 'fa-shoe-prints', cost: 0, status: '未安排', passCovered: true, mapUrl: 'https://maps.google.com/?q=Night+Safari+Singapore' },
+      { id: '11', day: 3, time: '09:00', activity: '甘榜格南 (哈芝巷)', location: '武吉士', transport: '地鐵市區線至武吉士站', transportIcon: 'fa-train-subway', cost: 500, status: '未安排', passCovered: false, mapUrl: 'https://maps.google.com/?q=Haji+Lane+Singapore' },
+      { id: '12', day: 3, time: '10:30', activity: '前往機場', location: '樟宜機場', transport: '地鐵綠線至樟宜機場站', transportIcon: 'fa-train-subway', cost: 300, status: '未安排', passCovered: false, mapUrl: 'https://maps.google.com/?q=Changi+Airport' },
+      { id: '13', day: 3, time: '13:25', activity: '起飛前往胡志明', location: '樟宜機場', transport: '步行至登機門', transportIcon: 'fa-plane', cost: 0, status: '已預訂', passCovered: false, mapUrl: 'https://maps.google.com/?q=Changi+Airport+Terminal' },
+    ];
+
+    const initialHotelFlight = [
+      { id: 'h1', type: '住宿', name: '唐人街1900號酒店', detail: '2 晚 / 雙人房', unitPrice: 4468, quantity: 2, total: 8935 },
+      { id: 'f1', type: '機票', name: '酷航 Scoot', detail: '來回機票 (包稅金)', unitPrice: 6231, quantity: 2, total: 12462 }
+    ];
+
+    const initialAttractionPass = {
+      name: '新加坡 Klook 景點通票 (含環球影城 + 3大景點)',
+      cost: 10660,
+      detail: '包含環球影城 (USS)、S.E.A. 海洋館、濱海灣花園 (花穹+雲霧林) 與夜間動物園門票',
+      status: '已預訂'
+    };
+
+    const initialFoodRecommendations = [
+      { name: '天天海南雞飯', location: '麥士威熟食中心 (牛車水)', estCost: 'NT$ 150 / 人', tags: ['平價美食', '米其林必比登'], mapUrl: 'https://maps.google.com/?q=Tian+Tian+Hainanese+Chicken+Rice+Maxwell', desc: '雞肉滑嫩多汁，淋上特製黑醬油與辣醬，配上香氣濃郁的雞油飯，是新加坡最具代表性的必吃美食。' },
+      { name: '松發肉骨茶', location: '克拉碼頭總店', estCost: 'NT$ 350 / 人', tags: ['潮州胡椒風', '免費加湯'], mapUrl: 'https://maps.google.com/?q=Song+Fa+Bak+Kut+Teh+Clarke+Quay', desc: '濃郁白胡椒香氣的排骨湯，排骨燉得軟嫩多汁，搭配油條沾湯吃非常道地，湯頭還可無限免費加湯！' },
+      { name: '亞坤咖椰吐司', location: '牛車水遠東廣場總店', estCost: 'NT$ 120 / 人', tags: ['傳統早餐', '經典必吃'], mapUrl: 'https://maps.google.com/?q=Ya+Kun+Kaya+Toast+Far+East+Square', desc: '烤得酥脆的吐司塗上香濃咖椰醬與厚切冷藏奶油，搭配半熟蛋與黑咖啡 (Kopi)，在地人最愛的經典早餐組合。' },
+      { name: '珍宝海鮮 Jumbo Seafood', location: '克拉碼頭 Riverside', estCost: 'NT$ 1,800 / 人', tags: ['辣椒蟹', '海鮮大餐'], mapUrl: 'https://maps.google.com/?q=Jumbo+Seafood+Riverside', desc: '著名的新加坡辣椒蟹，蟹肉肥美鮮甜，酸甜微辣的醬汁搭配炸小饅頭沾著吃絕對是視覺與味覺的享受！' },
+      { name: 'Singapore Zam Zam', location: '甘榜格南 (蘇丹回教堂對面)', estCost: 'NT$ 220 / 人', tags: ['印度煎餅', '百年老店'], mapUrl: 'https://maps.google.com/?q=Singapore+Zam+Zam', desc: '創立於1908年的百年異國美食老店，外皮酥脆的印度牛肉/羊肉煎餅 (Murtabak)，搭配特製咖哩醬超有滿足感。' },
+      { name: '老巴剎沙爹街 (Lau Pa Sat)', location: '金融區老巴剎熟食中心', estCost: 'NT$ 400 / 人', tags: ['夜市露天沙爹', '宵夜首選'], mapUrl: 'https://maps.google.com/?q=Lau+Pa+Sat+Satay+Street', desc: '每到傍晚街道封路變成露天沙爹夜市！炭火現烤雞肉、牛肉與蝦子串燒，沾上香濃花生沙爹醬配啤酒最讚。' }
+    ];
+
+    function App() {
+      const [totalBudget, setTotalBudget] = React.useState(60000);
+      const [itinerary, setItinerary] = React.useState(initialItinerary);
+      const [hotelFlight, setHotelFlight] = React.useState(initialHotelFlight);
+      const [attractionPass, setAttractionPass] = React.useState(initialAttractionPass);
+      const [foodBudget, setFoodBudget] = React.useState(5000);
+      const [quickNotes, setQuickNotes] = React.useState('1. 記得準備新加坡 E-Visa 與填寫 SG Arrival Card\n2. 帶好英規轉接頭\n3. 交通卡可直接刷含感應功能的信用卡 (EZ-Link / Visa / Mastercard)');
+
+      const [activeTab, setActiveTab] = React.useState('itinerary');
+      const [viewMode, setViewMode] = React.useState('timeline');
+      const [statusFilter, setStatusFilter] = React.useState('ALL');
+      const [dayFilter, setDayFilter] = React.useState('ALL');
+      const [searchTerm, setSearchTerm] = React.useState('');
+
+      const [showShareModal, setShowShareModal] = React.useState(false);
+      const [showConfigModal, setShowConfigModal] = React.useState(false);
+      const [customConfigInput, setCustomConfigInput] = React.useState(
+        window.CloudStorage && window.CloudStorage.firebaseConfig 
+          ? JSON.stringify(window.CloudStorage.firebaseConfig, null, 2) 
+          : ''
+      );
+      const [copySuccess, setCopySuccess] = React.useState(false);
+      const [syncStatus, setSyncStatus] = React.useState('offline');
+
+      const isRemoteUpdating = React.useRef(false);
+
+      const totalFlightCost = React.useMemo(() => hotelFlight.find(i => i.type === '機票')?.total || 0, [hotelFlight]);
+      const totalHotelCost = React.useMemo(() => hotelFlight.find(i => i.type === '住宿')?.total || 0, [hotelFlight]);
+      const totalPassCost = React.useMemo(() => Number(attractionPass.cost) || 0, [attractionPass]);
+      
+      const extraItineraryCost = React.useMemo(() => {
+        return itinerary.reduce((sum, item) => sum + (Number(item.cost) || 0), 0);
+      }, [itinerary]);
+
+      // Transport costs from itinerary
+      const transportCost = React.useMemo(() => {
+        return itinerary.reduce((sum, item) => {
+          return item.transportIcon === 'fa-taxi' || item.transport.includes('地鐵') || item.cost > 0 
+            ? sum + (Number(item.cost) || 0) 
+            : sum;
+        }, 0);
+      }, [itinerary]);
+
+      // Calculate total attractions (Pass + Extra entrance fees)
+      const totalAttractionCost = totalPassCost + (extraItineraryCost - transportCost);
+
+      const totalEstimatedExpense = totalFlightCost + totalHotelCost + foodBudget + transportCost + totalAttractionCost;
+      const remainingBalance = totalBudget - totalEstimatedExpense;
+      const budgetPercentage = Math.min(100, Math.round((totalEstimatedExpense / totalBudget) * 100));
+
+      // Filtered Itinerary Memo
+      const filteredItinerary = React.useMemo(() => {
+        return itinerary.filter(item => {
+          const matchDay = dayFilter === 'ALL' || item.day === Number(dayFilter);
+          const matchStatus = statusFilter === 'ALL' || item.status === statusFilter;
+          const matchSearch = searchTerm === '' || 
+            item.activity.toLowerCase().includes(searchTerm.toLowerCase()) || 
+            item.location.toLowerCase().includes(searchTerm.toLowerCase()) ||
+            item.transport.toLowerCase().includes(searchTerm.toLowerCase());
+          return matchDay && matchStatus && matchSearch;
+        });
+      }, [itinerary, dayFilter, statusFilter, searchTerm]);
+
+      React.useEffect(() => {
+        if (window.CloudStorage) {
+          if (window.CloudStorage.firebaseConfig) {
+            setSyncStatus('saved');
+          }
+          window.CloudStorage.init((cloudData) => {
+            if (!cloudData) return;
+            isRemoteUpdating.current = true;
+            if (cloudData.totalBudget !== undefined) setTotalBudget(cloudData.totalBudget);
+            if (cloudData.itinerary !== undefined) setItinerary(cloudData.itinerary);
+            if (cloudData.hotelFlight !== undefined) setHotelFlight(cloudData.hotelFlight);
+            if (cloudData.attractionPass !== undefined) setAttractionPass(cloudData.attractionPass);
+            if (cloudData.foodBudget !== undefined) setFoodBudget(cloudData.foodBudget);
+            if (cloudData.quickNotes !== undefined) setQuickNotes(cloudData.quickNotes);
+            setSyncStatus('saved');
+            setTimeout(() => { isRemoteUpdating.current = false; }, 300);
+          });
+        }
+      }, []);
+
+      // Save to Cloud Firestore
+      const saveToCloud = React.useCallback((payload) => {
+        if (window.CloudStorage && window.CloudStorage.isReady && !isRemoteUpdating.current) {
+          setSyncStatus('saving');
+          window.CloudStorage.saveData(payload)
+            .then(() => setSyncStatus('saved'))
+            .catch(() => setSyncStatus('offline'));
+        }
+      }, []);
+
+      const handleItineraryCostChange = (id, newCost) => {
+        const costNum = Math.max(0, parseInt(newCost) || 0);
+        const updated = itinerary.map(item => item.id === id ? { ...item, cost: costNum } : item);
+        setItinerary(updated);
+        saveToCloud({ itinerary: updated });
+      };
+
+      const handleItineraryStatusChange = (id, newStatus) => {
+        const updated = itinerary.map(item => item.id === id ? { ...item, status: newStatus } : item);
+        setItinerary(updated);
+        saveToCloud({ itinerary: updated });
+      };
+
+      const handleHotelFlightChange = (id, newTotal) => {
+        const costNum = Math.max(0, parseInt(newTotal) || 0);
+        const updated = hotelFlight.map(item => item.id === id ? { ...item, total: costNum } : item);
+        setHotelFlight(updated);
+        saveToCloud({ hotelFlight: updated });
+      };
+
+      const handlePassCostChange = (newCost) => {
+        const costNum = Math.max(0, parseInt(newCost) || 0);
+        const updated = { ...attractionPass, cost: costNum };
+        setAttractionPass(updated);
+        saveToCloud({ attractionPass: updated });
+      };
+
+      const handleResetData = () => {
+        setTotalBudget(60000);
+        setItinerary(initialItinerary);
+        setHotelFlight(initialHotelFlight);
+        setAttractionPass(initialAttractionPass);
+        setFoodBudget(5000);
+        saveToCloud({
+          totalBudget: 60000,
+          itinerary: initialItinerary,
+          hotelFlight: initialHotelFlight,
+          attractionPass: initialAttractionPass,
+          foodBudget: 5000
+        });
+      };
+
+      const handleCopyShareLink = () => {
+        const currentUrl = window.location.href.split('?')[0];
+        const shareUrl = `${currentUrl}?trip=${window.CloudStorage?.currentRoomId || 'singapore-3d2n-trip'}`;
+        
+        const tempInput = document.createElement('input');
+        tempInput.value = shareUrl;
+        document.body.appendChild(tempInput);
+        tempInput.select();
+        document.execCommand('copy');
+        document.body.removeChild(tempInput);
+
+        setCopySuccess(true);
+        setTimeout(() => setCopySuccess(false), 2500);
+      };
+
+      const handleSaveFirebaseConfig = () => {
+        try {
+          const parsed = JSON.parse(customConfigInput);
+          localStorage.setItem('custom_firebase_config', JSON.stringify(parsed));
+          window.location.reload();
+        } catch(e) {
+          alert("Firebase Config 格式不正確，請貼上有效的 JSON 物件！");
+        }
+      };
+
+      return (
+        <div className="min-h-screen pb-16">
+          {}
+          <header className="sticky top-0 z-40 bg-slate-900/90 backdrop-blur-md border-b border-slate-800 shadow-lg">
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3.5">
+              <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                <div className="flex items-center space-x-3">
+                  <div className="w-11 h-11 rounded-2xl bg-gradient-to-tr from-emerald-500 to-teal-400 flex items-center justify-center text-slate-950 shadow-md shadow-emerald-500/20">
+                    <i className="fa-solid fa-plane-departure text-xl font-black"></i>
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h1 className="text-xl font-black tracking-tight text-white">新加坡 3 天 2 夜遊行程</h1>
+                      
+                      {syncStatus === 'saved' && (
+                        <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
+                          <i className="fa-solid fa-sheet-plastic text-emerald-400"></i> Google 試算表同步 ({window.CloudStorage?.currentRoomId})
+                        </span>
+                      )}
+                      {syncStatus === 'saving' && (
+                        <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center gap-1 animate-pulse">
+                          <i className="fa-solid fa-arrows-rotate animate-spin"></i> 儲存至 Google 試算表中...
+                        </span>
+                      )}
+                      {syncStatus === 'offline' && (
+                        <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-slate-800 text-slate-400 border border-slate-700">
+                          <i className="fa-solid fa-laptop"></i> 本地模式
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-slate-400">點擊預算數值可直接編輯並即時連動加總</p>
+                  </div>
+                </div>
+
+                {/* Right controls */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    onClick={() => setShowShareModal(true)}
+                    className="px-3 py-1.5 rounded-xl text-xs font-bold bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-sm transition-all flex items-center gap-1.5"
+                  >
+                    <i className="fa-solid fa-share-nodes"></i> 🔗 分享多人編輯連結
+                  </button>
+
+                  <button
+                    onClick={() => setShowConfigModal(true)}
+                    className="px-3 py-1.5 rounded-xl text-xs font-bold bg-slate-800 text-slate-300 hover:text-white border border-slate-700 transition-all flex items-center gap-1.5"
+                  >
+                    <i className="fa-solid fa-gear"></i> 金鑰設定
+                  </button>
+
+                  <button
+                    onClick={handleResetData}
+                    className="px-2.5 py-1.5 rounded-xl text-xs font-bold bg-slate-800 text-slate-400 hover:text-white border border-slate-700 transition-all"
+                    title="重置數據"
+                  >
+                    <i className="fa-solid fa-rotate-left"></i>
+                  </button>
+
+                  {/* Navigation Tabs */}
+                  <div className="flex items-center bg-slate-800 p-1 rounded-xl border border-slate-700">
+                    <button
+                      onClick={() => setActiveTab('itinerary')}
+                      className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
+                        activeTab === 'itinerary' ? 'bg-emerald-500 text-slate-950' : 'text-slate-300 hover:text-white'
+                      }`}
+                    >
+                      <i className="fa-solid fa-calendar-days mr-1"></i>行程
+                    </button>
+                    <button
+                      onClick={() => setActiveTab('budget')}
+                      className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
+                        activeTab === 'budget' ? 'bg-emerald-500 text-slate-950' : 'text-slate-300 hover:text-white'
+                      }`}
+                    >
+                      <i className="fa-solid fa-wallet mr-1"></i>預算
+                    </button>
+                    <button
+                      onClick={() => setActiveTab('food')}
+                      className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
+                        activeTab === 'food' ? 'bg-emerald-500 text-slate-950' : 'text-slate-300 hover:text-white'
+                      }`}
+                    >
+                      <i className="fa-solid fa-utensils mr-1"></i>美食
+                    </button>
+                    <button
+                      onClick={() => setActiveTab('transport')}
+                      className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
+                        activeTab === 'transport' ? 'bg-emerald-500 text-slate-950' : 'text-slate-300 hover:text-white'
+                      }`}
+                    >
+                      <i className="fa-solid fa-route mr-1"></i>交通
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </header>
+
+          <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6 space-y-6">
+            {}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {/* Total Budget Card */}
+              <div className="glass-card p-5 rounded-3xl border border-slate-800 shadow-xl relative overflow-hidden group">
+                <div className="absolute top-0 right-0 w-24 h-24 bg-emerald-500/10 rounded-full blur-2xl group-hover:bg-emerald-500/20 transition-all"></div>
+                <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1 flex items-center justify-between">
+                  <span>總預算上限</span>
+                  <i className="fa-solid fa-pen-to-square text-emerald-400 text-xs opacity-70"></i>
+                </p>
+                <div className="flex items-baseline space-x-1">
+                  <span className="text-xl font-bold text-emerald-400">NT$</span>
+                  <input
+                    type="number"
+                    value={totalBudget}
+                    onChange={(e) => {
+                      const val = Math.max(0, parseInt(e.target.value) || 0);
+                      setTotalBudget(val);
+                      saveToCloud({ totalBudget: val });
+                    }}
+                    className="text-3xl font-black text-white bg-transparent border-b border-dashed border-emerald-500/40 focus:border-emerald-400 focus:outline-none w-full font-mono"
+                  />
+                </div>
+                <p className="text-[11px] text-slate-400 mt-2">可自由修改，即時計算剩餘資金</p>
+              </div>
+
+              {/* Total Estimated Cost Card */}
+              <div className="glass-card p-5 rounded-3xl border border-slate-800 shadow-xl relative overflow-hidden">
+                <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">預估總花費 (含通票與機酒)</p>
+                <div className="text-3xl font-black text-amber-400 font-mono">
+                  NT$ {totalEstimatedExpense.toLocaleString()}
+                </div>
+                <div className="w-full bg-slate-800 h-2 rounded-full mt-3 overflow-hidden">
+                  <div 
+                    className={`h-full transition-all duration-500 ${budgetPercentage > 90 ? 'bg-rose-500' : 'bg-emerald-400'}`}
+                    style={{ width: `${budgetPercentage}%` }}
+                  ></div>
+                </div>
+                <div className="flex justify-between items-center text-[11px] text-slate-400 mt-1">
+                  <span>已消耗預算</span>
+                  <span className="font-bold text-slate-200">{budgetPercentage}%</span>
+                </div>
+              </div>
+
+              {/* Remaining Balance Card */}
+              <div className="glass-card p-5 rounded-3xl border border-slate-800 shadow-xl relative overflow-hidden">
+                <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">剩餘可支配額度</p>
+                <div className={`text-3xl font-black font-mono ${remainingBalance >= 0 ? 'text-teal-300' : 'text-rose-400'}`}>
+                  NT$ {remainingBalance.toLocaleString()}
+                </div>
+                <p className="text-[11px] text-slate-400 mt-2">
+                  {remainingBalance >= 0 ? '✨ 預算控管良好，充裕不超支！' : '⚠️ 警告：目前設定花費已超出總預算上限！'}
+                </p>
+              </div>
+            </div>
+
+            {}
+            {activeTab === 'itinerary' && (
+              <div className="space-y-6">
+                {/* Controls Bar */}
+                <div className="glass-card p-4 rounded-2xl border border-slate-800 flex flex-col md:flex-row gap-4 items-center justify-between">
+                  <div className="flex items-center gap-2 w-full md:w-auto flex-wrap">
+                    {/* Day Selector */}
+                    <div className="flex bg-slate-900 p-1 rounded-xl border border-slate-800">
+                      {['ALL', '1', '2', '3'].map((day) => (
+                        <button
+                          key={day}
+                          onClick={() => setDayFilter(day)}
+                          className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
+                            dayFilter === day ? 'bg-emerald-500 text-slate-950' : 'text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          {day === 'ALL' ? '全部天數' : `Day ${day}`}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Status Filter */}
+                    <select
+                      value={statusFilter}
+                      onChange={(e) => setStatusFilter(e.target.value)}
+                      className="bg-slate-900 border border-slate-800 text-slate-300 text-xs rounded-xl px-3 py-1.5 focus:outline-none focus:border-emerald-500"
+                    >
+                      <option value="ALL">所有狀態</option>
+                      <option value="已完成">已完成</option>
+                      <option value="已預訂">已預訂</option>
+                      <option value="未安排">未安排</option>
+                    </select>
+                  </div>
+
+                  {/* Search and View Mode */}
+                  <div className="flex items-center gap-2 w-full md:w-auto justify-end">
+                    <div className="relative w-full md:w-48">
+                      <i className="fa-solid fa-magnifying-glass absolute left-3 top-2.5 text-xs text-slate-500"></i>
+                      <input
+                        type="text"
+                        placeholder="搜尋景點或交通..."
+                        value={searchTerm}
+                        onChange={(e) => setSearchTerm(e.target.value)}
+                        className="w-full bg-slate-900 border border-slate-800 text-xs rounded-xl pl-8 pr-3 py-1.5 text-slate-200 focus:outline-none focus:border-emerald-500"
+                      />
+                    </div>
+
+                    <div className="flex bg-slate-900 p-1 rounded-xl border border-slate-800">
+                      <button
+                        onClick={() => setViewMode('timeline')}
+                        className={`px-2.5 py-1 rounded-lg text-xs transition-all ${
+                          viewMode === 'timeline' ? 'bg-slate-700 text-emerald-400' : 'text-slate-400'
+                        }`}
+                        title="時間軸視圖"
+                      >
+                        <i className="fa-solid fa-[#timeline]"></i> 時間軸
+                      </button>
+                      <button
+                        onClick={() => setViewMode('table')}
+                        className={`px-2.5 py-1 rounded-lg text-xs transition-all ${
+                          viewMode === 'table' ? 'bg-slate-700 text-emerald-400' : 'text-slate-400'
+                        }`}
+                        title="表格視圖"
+                      >
+                        <i className="fa-solid fa-table-list"></i> 表格
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Timeline View */}
+                {viewMode === 'timeline' && (
+                  <div className="space-y-4">
+                    {filteredItinerary.map((item) => (
+                      <div key={item.id} className="glass-card p-4 rounded-2xl border border-slate-800 hover:border-slate-700 transition-all flex flex-col md:flex-row md:items-center justify-between gap-4">
+                        <div className="flex items-start gap-3">
+                          <div className="flex flex-col items-center">
+                            <span className="px-2 py-0.5 rounded-md text-[10px] font-black bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                              Day {item.day}
+                            </span>
+                            <span className="text-xs font-mono font-bold text-slate-400 mt-1">{item.time}</span>
+                          </div>
+
+                          <div>
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <h3 className="text-base font-bold text-white">{item.activity}</h3>
+                              {item.passCovered && (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                                  🎫 景點通票涵蓋
+                                </span>
+                              )}
+                              <a
+                                href={item.mapUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-xs text-sky-400 hover:text-sky-300 flex items-center gap-1"
+                              >
+                                <i className="fa-solid fa-location-dot"></i> {item.location}
+                              </a>
+                            </div>
+
+                            <p className="text-xs text-slate-400 mt-1 flex items-center gap-1.5">
+                              <i className={`fa-solid ${item.transportIcon} text-emerald-400`}></i>
+                              {item.transport}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between md:justify-end gap-4 border-t md:border-t-0 pt-3 md:pt-0 border-slate-800">
+                          {/* Cost Input */}
+                          <div className="flex items-center gap-1 bg-slate-900/80 px-3 py-1.5 rounded-xl border border-slate-800">
+                            <span className="text-xs text-slate-500">NT$</span>
+                            <input
+                              type="number"
+                              disabled={item.passCovered}
+                              value={item.cost}
+                              onChange={(e) => handleItineraryCostChange(item.id, e.target.value)}
+                              className={`w-20 bg-transparent text-xs font-mono font-bold text-emerald-400 focus:outline-none ${item.passCovered ? 'opacity-50 cursor-not-allowed' : ''}`}
+                            />
+                          </div>
+
+                          {/* Status Select */}
+                          <select
+                            value={item.status}
+                            onChange={(e) => handleItineraryStatusChange(item.id, e.target.value)}
+                            className={`text-xs font-bold px-2.5 py-1.5 rounded-xl border focus:outline-none ${
+                              item.status === '已完成' ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' :
+                              item.status === '已預訂' ? 'bg-amber-500/20 text-amber-300 border-amber-500/30' :
+                              'bg-rose-500/20 text-rose-300 border-rose-500/30'
+                            }`}
+                          >
+                            <option value="已完成" className="bg-slate-900 text-emerald-400">已完成</option>
+                            <option value="已預訂" className="bg-slate-900 text-amber-300">已預訂</option>
+                            <option value="未安排" className="bg-slate-900 text-rose-300">未安排</option>
+                          </select>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Table View */}
+                {viewMode === 'table' && (
+                  <div className="glass-card rounded-2xl border border-slate-800 overflow-x-auto">
+                    <table className="w-full text-left border-collapse">
+                      <thead>
+                        <tr className="bg-slate-900/80 text-xs text-slate-400 border-b border-slate-800">
+                          <th className="p-3">日期</th>
+                          <th className="p-3">時間</th>
+                          <th className="p-3">景點/活動</th>
+                          <th className="p-3">地點</th>
+                          <th className="p-3">交通方式</th>
+                          <th className="p-3">預估花費 (TWD)</th>
+                          <th className="p-3">狀態</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800 text-xs">
+                        {filteredItinerary.map((item) => (
+                          <tr key={item.id} className="hover:bg-slate-900/40">
+                            <td className="p-3 font-bold text-emerald-400">Day {item.day}</td>
+                            <td className="p-3 font-mono">{item.time}</td>
+                            <td className="p-3 font-bold text-white">{item.activity}</td>
+                            <td className="p-3 text-slate-300">{item.location}</td>
+                            <td className="p-3 text-slate-400">{item.transport}</td>
+                            <td className="p-3 font-mono">
+                              <input
+                                type="number"
+                                disabled={item.passCovered}
+                                value={item.cost}
+                                onChange={(e) => handleItineraryCostChange(item.id, e.target.value)}
+                                className="w-20 bg-slate-900 px-2 py-1 rounded border border-slate-700 text-emerald-400 focus:outline-none"
+                              />
+                            </td>
+                            <td className="p-3">
+                              <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                item.status === '已完成' ? 'bg-emerald-500/20 text-emerald-400' :
+                                item.status === '已預訂' ? 'bg-amber-500/20 text-amber-300' :
+                                'bg-rose-500/20 text-rose-300'
+                              }`}>
+                                {item.status}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {}
+            {activeTab === 'budget' && (
+              <div className="space-y-6">
+                {/* Accommodation & Flights & Attraction Pass Card */}
+                <div className="glass-card p-6 rounded-3xl border border-slate-800 space-y-4">
+                  <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                    <h3 className="text-base font-bold text-white flex items-center gap-2">
+                      <i className="fa-solid fa-ticket text-emerald-400"></i>
+                      主要大額費用與景點通票設定
+                    </h3>
+                    <span className="text-xs text-slate-400">直接修改總金額，自動即時計算</span>
+                  </div>
+
+                  {/* Attraction Pass Section */}
+                  <div className="bg-gradient-to-r from-amber-500/10 to-slate-900 p-4 rounded-2xl border border-amber-500/30 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500 text-slate-950">RECOMMENDED</span>
+                        <h4 className="text-sm font-bold text-white">{attractionPass.name}</h4>
+                      </div>
+                      <p className="text-xs text-slate-400 mt-1">{attractionPass.detail}</p>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-slate-400">總花費: NT$</span>
+                      <input
+                        type="number"
+                        value={attractionPass.cost}
+                        onChange={(e) => handlePassCostChange(e.target.value)}
+                        className="w-28 bg-slate-900 text-sm font-bold font-mono text-amber-300 border border-amber-500/40 px-3 py-1.5 rounded-xl focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Hotels & Flights List */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {hotelFlight.map((item) => (
+                      <div key={item.id} className="bg-slate-900/60 p-4 rounded-2xl border border-slate-800 flex items-center justify-between">
+                        <div>
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-800 text-emerald-400 border border-slate-700">
+                            {item.type}
+                          </span>
+                          <h4 className="text-sm font-bold text-white mt-1">{item.name}</h4>
+                          <p className="text-xs text-slate-400">{item.detail}</p>
+                        </div>
+
+                        <div className="flex items-center gap-1">
+                          <span className="text-xs text-slate-500">NT$</span>
+                          <input
+                            type="number"
+                            value={item.total}
+                            onChange={(e) => handleHotelFlightChange(item.id, e.target.value)}
+                            className="w-24 bg-slate-950 text-xs font-bold font-mono text-emerald-400 border border-slate-700 px-2.5 py-1.5 rounded-xl focus:outline-none"
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Category Breakdown Progress */}
+                <div className="glass-card p-6 rounded-3xl border border-slate-800 space-y-4">
+                  <h3 className="text-base font-bold text-white border-b border-slate-800 pb-3">預算分類統計與比例</h3>
+
+                  <div className="space-y-3">
+                    {[
+                      { name: '機票費用', amount: totalFlightCost, icon: 'fa-plane', color: 'bg-sky-500' },
+                      { name: '住宿費用', amount: totalHotelCost, icon: 'fa-hotel', color: 'bg-teal-500' },
+                      { name: '景點門票/通票', amount: totalAttractionCost, icon: 'fa-ticket', color: 'bg-amber-500' },
+                      { name: '預估餐飲費用', amount: foodBudget, icon: 'fa-utensils', color: 'bg-emerald-500', isEditable: true },
+                      { name: '交通花費', amount: transportCost, icon: 'fa-route', color: 'bg-purple-500' }
+                    ].map((cat, idx) => (
+                      <div key={idx} className="space-y-1">
+                        <div className="flex justify-between items-center text-xs">
+                          <span className="flex items-center gap-1.5 text-slate-300 font-bold">
+                            <i className={`fa-solid ${cat.icon} text-slate-400`}></i> {cat.name}
+                          </span>
+                          <div className="flex items-center gap-2">
+                            {cat.isEditable ? (
+                              <div className="flex items-center gap-1">
+                                <span className="text-slate-500">NT$</span>
+                                <input
+                                  type="number"
+                                  value={foodBudget}
+                                  onChange={(e) => {
+                                    const val = Math.max(0, parseInt(e.target.value) || 0);
+                                    setFoodBudget(val);
+                                    saveToCloud({ foodBudget: val });
+                                  }}
+                                  className="w-20 bg-slate-900 border border-slate-700 text-xs font-bold text-emerald-400 px-2 py-0.5 rounded focus:outline-none"
+                                />
+                              </div>
+                            ) : (
+                              <span className="font-mono font-bold text-emerald-400">NT$ {cat.amount.toLocaleString()}</span>
+                            )}
+                            <span className="text-slate-500">({Math.round((cat.amount / (totalEstimatedExpense || 1)) * 100)}%)</span>
+                          </div>
+                        </div>
+                        <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
+                          <div
+                            className={`h-full ${cat.color}`}
+                            style={{ width: `${Math.min(100, (cat.amount / (totalEstimatedExpense || 1)) * 100)}%` }}
+                          ></div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {}
+            {activeTab === 'food' && (
+              <div className="space-y-6">
+                <div className="glass-card p-6 rounded-3xl border border-slate-800 flex flex-col md:flex-row items-center justify-between gap-4">
+                  <div>
+                    <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                      <i className="fa-solid fa-utensils text-emerald-400"></i> 新加坡必吃美食與餐廳指南
+                    </h3>
+                    <p className="text-xs text-slate-400 mt-1">
+                      配合設定的餐飲預算（NT$ {foodBudget.toLocaleString()}），為您嚴選的平價熟食中心與排隊名店。
+                    </p>
+                  </div>
+                  <div className="bg-slate-900 px-4 py-2 rounded-2xl border border-slate-800 text-center">
+                    <span className="text-[10px] text-slate-400 block">建議平均餐費預算</span>
+                    <span className="text-sm font-bold text-emerald-400 font-mono">約 S$ 15 - 30 / 餐</span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {initialFoodRecommendations.map((food, idx) => (
+                    <div key={idx} className="glass-card p-5 rounded-3xl border border-slate-800 hover:border-slate-700 transition-all flex flex-col justify-between space-y-3">
+                      <div>
+                        <div className="flex items-center justify-between gap-2">
+                          <h4 className="text-base font-bold text-white">{food.name}</h4>
+                          <span className="text-xs font-mono font-bold text-amber-300 bg-amber-500/10 px-2.5 py-0.5 rounded-full border border-amber-500/20">
+                            {food.estCost}
+                          </span>
+                        </div>
+                        <p className="text-xs text-emerald-400 mt-1 flex items-center gap-1">
+                          <i className="fa-solid fa-location-dot"></i> {food.location}
+                        </p>
+                        <p className="text-xs text-slate-300 mt-2 leading-relaxed">{food.desc}</p>
+                      </div>
+
+                      <div className="pt-3 border-t border-slate-800/80 flex items-center justify-between">
+                        <div className="flex gap-1 flex-wrap">
+                          {food.tags.map((tag, tidx) => (
+                            <span key={tidx} className="text-[10px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded-md">
+                              #{tag}
+                            </span>
+                          ))}
+                        </div>
+                        <a
+                          href={food.mapUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="px-3 py-1.5 rounded-xl bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500 hover:text-slate-950 text-xs font-bold transition-all flex items-center gap-1"
+                        >
+                          <i className="fa-solid fa-map-location-dot"></i> 開啟地圖
+                        </a>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {}
+            {activeTab === 'transport' && (
+              <div className="space-y-6">
+                <div className="glass-card p-6 rounded-3xl border border-slate-800 space-y-4">
+                  <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                    <i className="fa-solid fa-route text-emerald-400"></i> 新加坡景點間交通路線指南
+                  </h3>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="bg-slate-900/60 p-4 rounded-2xl border border-slate-800 space-y-2">
+                      <div className="flex items-center gap-2 text-emerald-400 font-bold text-sm">
+                        <i className="fa-solid fa-train-subway"></i> 樟宜機場 ➔ 牛車水飯店
+                      </div>
+                      <p className="text-xs text-slate-300 leading-relaxed">
+                        搭乘地鐵綠線 (東西線) 至丹那美拉站 (Tanah Merah)，轉乘綠線往市區，於歐南園站 (Outram Park) 轉紫線 (東北線) 1 站至牛車水站 (Chinatown)。
+                      </p>
+                    </div>
+
+                    <div className="bg-slate-900/60 p-4 rounded-2xl border border-slate-800 space-y-2">
+                      <div className="flex items-center gap-2 text-emerald-400 font-bold text-sm">
+                        <i className="fa-solid fa-train-subway"></i> 牛車水 ➔ 濱海灣金沙 / 花園
+                      </div>
+                      <p className="text-xs text-slate-300 leading-relaxed">
+                        從牛車水搭乘地鐵市區線 (藍線) 直達海灣舫站 (Bayfront)，出站即為金沙酒店與濱海灣花園天空樹。
+                      </p>
+                    </div>
+
+                    <div className="bg-slate-900/60 p-4 rounded-2xl border border-slate-800 space-y-2">
+                      <div className="flex items-center gap-2 text-emerald-400 font-bold text-sm">
+                        <i className="fa-solid fa-ferry"></i> 牛車水 ➔ 聖淘沙 (環球影城)
+                      </div>
+                      <p className="text-xs text-slate-300 leading-relaxed">
+                        搭乘地鐵紫線至港灣站 (HarbourFront)，直通怡豐城 (VivoCity) 3樓轉乘聖淘沙捷運 (Sentosa Express) 至名勝世界站下車。
+                      </p>
+                    </div>
+
+                    <div className="bg-slate-900/60 p-4 rounded-2xl border border-slate-800 space-y-2">
+                      <div className="flex items-center gap-2 text-amber-400 font-bold text-sm">
+                        <i className="fa-solid fa-taxi"></i> 聖淘沙 ➔ 夜間動物園 (萬禮)
+                      </div>
+                      <p className="text-xs text-slate-300 leading-relaxed">
+                        距離較遠，建議使用 Grab 叫車或搭乘計程車，車程約 30-40 分鐘，費用約 S$ 20-25 (約 NT$ 500)，多人平攤最划算。
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {}
+            <div className="glass-card p-6 rounded-3xl border border-slate-800 space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                  <i className="fa-solid fa-note-sticky text-amber-400"></i> 行前隨手備忘錄
+                </h3>
+                <span className="text-[10px] text-slate-500">雲端自動儲存</span>
+              </div>
+              <textarea
+                value={quickNotes}
+                onChange={(e) => {
+                  setQuickNotes(e.target.value);
+                  saveToCloud({ quickNotes: e.target.value });
+                }}
+                rows={3}
+                className="w-full bg-slate-900/80 border border-slate-800 rounded-2xl p-3 text-xs text-slate-200 focus:outline-none focus:border-emerald-500 leading-relaxed custom-scrollbar"
+                placeholder="在這裡寫下隨身提醒、信用卡優惠或購物清單..."
+              ></textarea>
+            </div>
+          </main>
+
+          {}
+          {showShareModal && (
+            <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4">
+              <div className="glass-card max-w-md w-full p-6 rounded-3xl border border-slate-700 shadow-2xl relative">
+                <button 
+                  onClick={() => setShowShareModal(false)}
+                  className="absolute top-4 right-4 text-slate-400 hover:text-white text-lg"
+                >
+                  <i className="fa-solid fa-xmark"></i>
+                </button>
+
+                <div className="w-12 h-12 rounded-2xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-xl mb-4 border border-emerald-500/30">
+                  <i className="fa-solid fa-users"></i>
+                </div>
+
+                <h3 className="text-lg font-bold text-white mb-1">線上多人協同編輯連結</h3>
+                <p className="text-xs text-slate-400 mb-4 leading-relaxed">
+                  複製下方專屬房間連結傳給同行好友，開啟後所有人即可**即時同步檢視與共同修改預算與行程**！
+                </p>
+
+                <div className="bg-slate-900 p-3 rounded-xl border border-slate-800 text-xs text-emerald-400 font-mono break-all mb-4">
+                  {window.location.href.split('?')[0]}?trip={window.CloudStorage?.currentRoomId || 'singapore-3d2n-trip'}
+                </div>
+
+                <button
+                  onClick={handleCopyShareLink}
+                  className={`w-full py-3 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 ${
+                    copySuccess ? 'bg-emerald-500 text-slate-950' : 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                  }`}
+                >
+                  {copySuccess ? <><i className="fa-solid fa-check"></i> 已複製連結！</> : <><i className="fa-solid fa-copy"></i> 複製多人同步連結</>}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {}
+          {showConfigModal && (
+            <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4">
+              <div className="glass-card max-w-lg w-full p-6 rounded-3xl border border-slate-700 shadow-2xl relative">
+                <button 
+                  onClick={() => setShowConfigModal(false)}
+                  className="absolute top-4 right-4 text-slate-400 hover:text-white text-lg"
+                >
+                  <i className="fa-solid fa-xmark"></i>
+                </button>
+
+                <div className="w-12 h-12 rounded-2xl bg-sky-500/20 text-sky-400 flex items-center justify-center text-xl mb-4 border border-sky-500/30">
+                  <i className="fa-solid fa-database"></i>
+                </div>
+
+                <h3 className="text-lg font-bold text-white mb-1">自訂 Firebase 資料庫金鑰</h3>
+                <p className="text-xs text-slate-400 mb-3">
+                  若要在您自己的 GitHub Pages 上進行資料庫託管，請貼上您的 Firebase Console 設定：
+                </p>
+
+                <textarea
+                  value={customConfigInput}
+                  onChange={(e) => setCustomConfigInput(e.target.value)}
+                  placeholder={`{\n  "apiKey": "AIzaSy...",\n  "authDomain": "your-app.firebaseapp.com",\n  "projectId": "your-app",\n  "storageBucket": "your-app.appspot.com",\n  "messagingSenderId": "...",\n  "appId": "..."\n}`}
+                  className="w-full h-40 p-3 bg-slate-900 text-xs font-mono border border-slate-700 rounded-xl focus:outline-none text-slate-200 resize-none mb-4"
+                ></textarea>
+
+                <div className="flex justify-end gap-2">
+                  <button
+                    onClick={() => {
+                      localStorage.removeItem('custom_firebase_config');
+                      window.location.reload();
+                    }}
+                    className="px-3 py-2 rounded-xl text-xs font-bold bg-slate-800 text-rose-400 hover:bg-rose-500/20 border border-slate-700"
+                  >
+                    清除設定
+                  </button>
+                  <button
+                    onClick={handleSaveFirebaseConfig}
+                    className="px-4 py-2 rounded-xl text-xs font-bold bg-sky-500 hover:bg-sky-400 text-slate-950"
+                  >
+                    儲存金鑰並重新載入
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
